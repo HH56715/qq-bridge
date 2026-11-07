@@ -17,13 +17,13 @@
 | --- | --- |
 | DeepSeek Harness | `>= 0.2.0`（用到 `webServer` 注入） |
 | [dsh-persona-dafeiyu](https://github.com/huaizhuanghub/dsh-persona-dafeiyu) | `v0.8.x`；没有它插件只剩人格卡那一半，功能仍可用 |
-| qq-bridge | 可选；没有它只剩插件人设那一半 |
+| qq-bridge | 可选；>= v0.2.1-r1（已在该版本实测）。没有它只剩插件人设那一半 |
 
 两侧都是可选的：一边连不上，另一边照样能切，界面上会标出来并给出原因。
 
 ## 安装
 
-本包住在 [qq-bridge](https://github.com/Derpyu520/qq-bridge) fork 的 `plugins/` 子目录里，按子目录装：
+本包住在 [qq-bridge](https://github.com/Derpyu520/qq-bridge) 的 fork（HH56715/qq-bridge）的 `plugins/` 子目录里，按子目录装：
 
 ```powershell
 dsh plugin --profile web add github:HH56715/qq-bridge#path:/plugins/qq-persona-switch
@@ -72,15 +72,26 @@ dsh plugin --profile web add github:HH56715/qq-bridge#path:/plugins/qq-persona-s
         bridgeDir: C:/Users/<你>/path/to/qq-bridge
 ```
 
-全部留空也能跑，只是两侧都会连不上。**填 `bridgeDir` 是最省事的做法**，下面三项都能自动读出来：
+全部留空也能跑：插件会先自己找 qq-bridge，找到后下面三项都能读出来。找不到才轮到默认值。
 
 | 配置 | 留空时会去读 | 再兜底 |
 | --- | --- | --- |
-| `bridgeDir` | —— | 环境变量 `QQ_BRIDGE_DIR` |
+| `bridgeDir` | —— | 先看 `QQ_BRIDGE_DIR`；再从 `workspaceCwd` 和 DSH 进程的 cwd 各自向上找 3 层（每层看本目录与它的 `qq-bridge` 子目录） |
 | `bridgeBaseUrl` | `<bridgeDir>/config.json` 的 `consolePort` | `http://127.0.0.1:3100` |
 | `dshBaseUrl` | 同上文件的 `dsh.baseUrl` | `http://127.0.0.1:3080` |
 | `consoleToken` | 同上文件的 `consoleToken` → `<bridgeDir>/state/console-token` | 环境变量 `QQ_BRIDGE_CONSOLE_TOKEN` |
 | `workspaceCwd` | 同上文件的 `sessionCwd` | —— （插件人设**必须有**它） |
+
+**自动发现**认的是目录长相，不是名字：一个有 `config.json`、并且能认出是桥的目录（存在 `src/bridge.js` 或 `state/console-token`，或 `package.json` 的 `name` 像 `qq-bridge`）。所以
+
+```
+D:\bots\my-bot\qq-workspace     ← QQ bot 的工作区（插件从这儿上溯）
+D:\bots\my-bot\qq-bridge        ← 桥，config.json 在这儿
+```
+
+这种「工作区与桥同级」的布局，装完什么都不用填就能直接出来。反过来说：桥放在别的盘、别的层级，就填 `bridgeDir` 或设 `QQ_BRIDGE_DIR`，别指望猜。
+
+> 为什么值得猜一次：市场里一键装完没有配置界面，用户也不会去翻 README —— 不猜的话，打开页面只有一句「没有桥接控制台令牌」，看着就像插件坏了。
 
 令牌每次请求都重新读：桥接重启会重新生成 `state/console-token`，缓存住只会一直 401。
 
@@ -117,7 +128,7 @@ POST /api/qq-persona-switch/switch   {"source":"role"|"plugin"|"none","id":"..."
 
 ```powershell
 node test/core.test.js   # 切换语义（谁先写、失败怎么收尾）+ 12 个用例
-node test/http.test.js   # 三道门 + 路由接线 + 配置推导
+node test/http.test.js   # 三道门 + 路由接线 + 配置推导与自动发现 + 12 个用例
 ```
 
 `lib/` 下没有任何第三方依赖，两份测试都能在 Node 里裸跑，不需要先装依赖。

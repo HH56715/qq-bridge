@@ -19,7 +19,26 @@ import {
   readJsonBody,
   describeError,
 } from '../lib/http.js'
-import { BASE_PATH, apply, resolveSettings } from '../lib/index.js'
+import { BASE_PATH, apply, discoverBridgeDir, looksLikeBridgeDir, resolveSettings } from '../lib/index.js'
+
+/** 造一棵「桥 + 工作区同级」的假目录树，用来测自动发现。 */
+function fakeLayout() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qps-layout-'))
+  const workspace = path.join(root, 'qq-workspace')
+  const bridge = path.join(root, 'qq-bridge')
+  fs.mkdirSync(workspace, { recursive: true })
+  fs.mkdirSync(path.join(bridge, 'src'), { recursive: true })
+  fs.mkdirSync(path.join(bridge, 'state'), { recursive: true })
+  fs.writeFileSync(path.join(bridge, 'src', 'bridge.js'), '// stub\n', 'utf8')
+  fs.writeFileSync(path.join(bridge, 'config.json'), JSON.stringify({
+    consolePort: 3197,
+    consoleToken: '',
+    sessionCwd: workspace,
+    dsh: { baseUrl: 'http://127.0.0.1:3997' },
+  }), 'utf8')
+  fs.writeFileSync(path.join(bridge, 'state', 'console-token'), 'discovered-token\n', 'utf8')
+  return { root, workspace, bridge }
+}
 
 function fakeReq({ method = 'GET', headers = {}, body = null, remoteAddress = '127.0.0.1' } = {}) {
   const req = new EventEmitter()
@@ -150,12 +169,92 @@ test('resolveSettings 从 qq-bridge 的 config.json 与 console-token 推导', (
 })
 
 test('resolveSettings 在什么都没有时给出可读的 notes', () => {
-  const settings = resolveSettings({})
-  assert.equal(settings.bridgeBaseUrl, 'http://127.0.0.1:3100')
-  assert.equal(settings.dshBaseUrl, 'http://127.0.0.1:3080')
-  assert.equal(settings.token, '')
-  assert.ok(settings.notes.some((line) => /工作区/.test(line)))
-  assert.ok(settings.notes.some((line) => /令牌/.test(line)))
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'qps-empty-'))
+  try {
+    const settings = resolveSettings({}, { cwd: empty, env: {} })
+    assert.equal(settings.bridgeBaseUrl, 'http://127.0.0.1:3100')
+    assert.equal(settings.dshBaseUrl, 'http://127.0.0.1:3080')
+    assert.equal(settings.token, '')
+    assert.equal(settings.bridgeDir, '')
+    assert.ok(settings.notes.some((line) => /qq-bridge 目录/.test(line)))
+    assert.ok(settings.notes.some((line) => /工作区/.test(line)))
+    // 找不到目录时不该再叠一条「没有令牌」的噪音：上一条已经把该做的事说完了
+    assert.ok(!settings.notes.some((line) => /令牌/.test(line)))
+  } finally {
+    fs.rmSync(empty, { recursive: true, force: true })
+  }
+})
+
+test('looksLikeBridgeDir 只认真正的桥目录', () => {
+  const { root, bridge } = fakeLayout()
+  try {
+    assert.equal(looksLikeBridgeDir(bridge), true)
+    // 有 config.json 但没有桥的任何特征 —— 不算
+    const decoy = path.join(root, 'decoy')
+    fs.mkdirSync(decoy, { recursive: true })
+    fs.writeFileSync(path.join(decoy, 'config.json'), '{"a":1}', 'utf8')
+    assert.equal(looksLikeBridgeDir(decoy), false)
+    assert.equal(looksLikeBridgeDir(path.join(root, 'nope')), false)
+    // 只有 package.json 里的名字也算（bridge 刚 clone、还没跑过时没有 state/）
+    const fresh = path.join(root, 'fresh')
+    fs.mkdirSync(fresh, { recursive: true })
+    fs.writeFileSync(path.join(fresh, 'config.json'), '{}', 'utf8')
+    fs.writeFileSync(path.join(fresh, 'package.json'), '{"name":"qq-bridge"}', 'utf8')
+    assert.equal(looksLikeBridgeDir(fresh), true)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('discoverBridgeDir 从工作区向上找到同级的 qq-bridge', () => {
+  const { root, workspace, bridge } = fakeLayout()
+  try {
+    // 市场安装后的真实情形：工作区在桥的隔壁
+    const found = discoverBridgeDir({ workspaceCwd: workspace, cwd: root, env: {} })
+    assert.ok(found, '应该找到 qq-bridge')
+    assert.equal(path.resolve(found.dir), path.resolve(bridge))
+    assert.match(found.source, /upward from/)
+
+    // 从更深的子目录也应该能上去
+    const deep = path.join(workspace, 'a', 'b')
+    fs.mkdirSync(deep, { recursive: true })
+    assert.equal(path.resolve(discoverBridgeDir({ cwd: deep, env: {} }).dir), path.resolve(bridge))
+
+    // 环境变量优先
+    const viaEnv = discoverBridgeDir({ cwd: path.parse(root).root, env: { QQ_BRIDGE_DIR: bridge } })
+    assert.equal(path.resolve(viaEnv.dir), path.resolve(bridge))
+    assert.equal(viaEnv.source, 'env QQ_BRIDGE_DIR')
+
+    // 找不到就是 null，不许乱猜（用一棵与之无关的树，别让 root 那棵干扰）
+    const isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'qps-isolated-'))
+    try {
+      assert.equal(discoverBridgeDir({ cwd: path.join(isolated, 'x'), env: {} }), null)
+    } finally {
+      fs.rmSync(isolated, { recursive: true, force: true })
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('resolveSettings 在 bridgeDir 留空时自动发现并照常推导出端口与令牌', () => {
+  const { root, workspace, bridge } = fakeLayout()
+  try {
+    const settings = resolveSettings({ workspaceCwd: workspace }, { cwd: root, env: {} })
+    assert.equal(path.resolve(settings.bridgeDir), path.resolve(bridge))
+    assert.match(settings.bridgeDirSource, /upward from/)
+    assert.equal(settings.bridgeBaseUrl, 'http://127.0.0.1:3197')
+    assert.equal(settings.dshBaseUrl, 'http://127.0.0.1:3997')
+    assert.equal(settings.token, 'discovered-token')
+    assert.equal(settings.workspaceCwd, workspace)
+    assert.deepEqual(settings.notes, [])
+
+    // 显式填了就用显式的，不做发现
+    const explicit = resolveSettings({ bridgeDir: bridge }, { cwd: path.parse(root).root, env: {} })
+    assert.equal(explicit.bridgeDirSource, 'config')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('apply 挂上四条路由，并且页面能拿到', async () => {

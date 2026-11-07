@@ -34,7 +34,7 @@ import {
 import { renderPage } from './ui.js'
 
 export const name = 'qq-persona-switch'
-export const VERSION = '0.1.0'
+export const VERSION = '0.1.1'
 
 /** 所有路由都挂在这个前缀下，避免和 DSH / 别的插件抢路径。 */
 export const BASE_PATH = '/api/qq-persona-switch'
@@ -77,18 +77,117 @@ function readJsonFile(file) {
   }
 }
 
+function isDir(target) {
+  try {
+    return fs.statSync(target).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function exists(target) {
+  try {
+    fs.accessSync(target)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 一个目录「像不像 qq-bridge 的安装目录」：必须有 `config.json`，且能认出它是桥
+ * （`src/bridge.js`、`state/console-token` 或 package.json 里的名字）。
+ *
+ * 只认这三种证据是有意的：只看 `config.json` 会把任何手写配置的目录当成桥，
+ * 而桥的 config.json 里没有版本字段可对。
+ */
+export function looksLikeBridgeDir(dir) {
+  if (!isDir(dir)) return false
+  if (!exists(path.join(dir, 'config.json'))) return false
+  if (exists(path.join(dir, 'src', 'bridge.js'))) return true
+  if (exists(path.join(dir, 'state', 'console-token'))) return true
+  const pkg = readJsonFile(path.join(dir, 'package.json'))
+  return Boolean(pkg && typeof pkg.name === 'string' && /qq[-_]?bridge/i.test(pkg.name))
+}
+
+// 向上找几层。够覆盖 `.../<bot>/qq-workspace` 与 `.../<bot>/qq-bridge` 这种同级布局，
+// 又不至于扫到盘符根。
+const DISCOVERY_DEPTH = 3
+
+/**
+ * 配置里没填 `bridgeDir` 时，猜一个。
+ *
+ * 市场里一键装完是没有配置界面的，用户也不会去翻 README 填路径；没有这一层，
+ * 装完打开页面只有「没有桥接控制台令牌」，看起来就像插件坏了。
+ *
+ * 顺序：`QQ_BRIDGE_DIR` → 从 `workspaceCwd` / 进程 cwd 各自向上 3 层，每层看
+ * 本目录和它的 `qq-bridge` 子目录。纯 stat，不扫盘。
+ */
+export function discoverBridgeDir({ workspaceCwd = '', cwd = '', env = process.env } = {}) {
+  const envDir = text(env.QQ_BRIDGE_DIR)
+  if (envDir) {
+    const resolved = path.resolve(envDir)
+    if (looksLikeBridgeDir(resolved)) return { dir: resolved, source: 'env QQ_BRIDGE_DIR' }
+  }
+
+  const starts = []
+  for (const raw of [workspaceCwd, cwd || process.cwd()]) {
+    const value = text(raw)
+    if (value.length === 0) continue
+    const abs = path.resolve(value)
+    if (!starts.includes(abs)) starts.push(abs)
+  }
+
+  for (const start of starts) {
+    let cur = start
+    for (let depth = 0; depth <= DISCOVERY_DEPTH; depth += 1) {
+      for (const candidate of [cur, path.join(cur, 'qq-bridge')]) {
+        if (looksLikeBridgeDir(candidate)) {
+          return { dir: candidate, source: `upward from ${start}` }
+        }
+      }
+      const parent = path.dirname(cur)
+      if (parent === cur) break
+      cur = parent
+    }
+  }
+  return null
+}
+
 /**
  * 把配置归一成「两个地址 + 一个令牌 + 一个工作区」，并把推导过程记进 notes。
  *
  * 每次请求都重新读一遍 config.json 和 state/console-token：桥接重启会**重新生成**
  * 令牌，缓存住反而会一直 401。
  */
-export function resolveSettings(config = {}) {
+export function resolveSettings(config = {}, { cwd = process.cwd(), env = process.env } = {}) {
   const notes = []
-  const bridgeDir = text(config.bridgeDir) || text(process.env.QQ_BRIDGE_DIR)
+  let bridgeDir = text(config.bridgeDir)
+  let bridgeDirSource = bridgeDir.length > 0 ? 'config' : ''
+
+  if (bridgeDir.length === 0) {
+    const envDir = text(env.QQ_BRIDGE_DIR)
+    if (envDir.length > 0) {
+      bridgeDir = envDir
+      bridgeDirSource = 'env QQ_BRIDGE_DIR'
+    }
+  }
+  if (bridgeDir.length === 0) {
+    const found = discoverBridgeDir({
+      workspaceCwd: text(config.workspaceCwd),
+      cwd,
+      env,
+    })
+    if (found) {
+      bridgeDir = found.dir
+      bridgeDirSource = found.source
+    } else {
+      notes.push('没找到 qq-bridge 目录：请填 bridgeDir，或设环境变量 QQ_BRIDGE_DIR。')
+    }
+  }
   let bridgeBaseUrl = text(config.bridgeBaseUrl)
   let dshBaseUrl = text(config.dshBaseUrl)
-  let token = text(config.consoleToken) || text(process.env.QQ_BRIDGE_CONSOLE_TOKEN)
+  let token = text(config.consoleToken) || text(env.QQ_BRIDGE_CONSOLE_TOKEN)
   let workspaceCwd = text(config.workspaceCwd)
 
   if (bridgeDir.length > 0) {
@@ -120,11 +219,11 @@ export function resolveSettings(config = {}) {
   if (workspaceCwd.length === 0) {
     notes.push('没有工作区路径：插件人设无法按工作区落位，切换会被拒绝。')
   }
-  if (token.length === 0) {
+  if (token.length === 0 && bridgeDir.length > 0) {
     notes.push('没有桥接控制台令牌：读人格卡会 401。请填 bridgeDir 或 consoleToken。')
   }
 
-  return { bridgeDir, bridgeBaseUrl, dshBaseUrl, token, workspaceCwd, notes }
+  return { bridgeDir, bridgeDirSource, bridgeBaseUrl, dshBaseUrl, token, workspaceCwd, notes }
 }
 
 /** 按 settings 造两个客户端。地址不合法时抛 UpstreamError，由 handler 转成 500。 */
@@ -157,6 +256,7 @@ async function handleState(req, res, config) {
       ...state,
       settings: {
         bridgeDir: settings.bridgeDir,
+        bridgeDirSource: settings.bridgeDirSource,
         bridgeBaseUrl: settings.bridgeBaseUrl,
         dshBaseUrl: settings.dshBaseUrl,
         workspaceCwd: settings.workspaceCwd,

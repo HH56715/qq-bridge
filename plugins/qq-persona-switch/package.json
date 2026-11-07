@@ -1,6 +1,6 @@
 {
   "name": "qq-persona-switch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One switch for two persona layers: flip a DeepSeek Harness bot between qq-bridge role cards and dsh-persona-dafeiyu personas, never both at once.",
   "type": "module",
   "main": "./lib/index.js",
