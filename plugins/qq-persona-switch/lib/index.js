@@ -32,9 +32,20 @@ import {
   sendJson,
 } from './http.js'
 import { renderPage } from './ui.js'
+import {
+  assignChat,
+  enterPerChat,
+  exitPerChat,
+  injectionText,
+  listChats,
+  readSessions,
+  readStore,
+  reconcile,
+  writeStore,
+} from './per-chat.js'
 
 export const name = 'qq-persona-switch'
-export const VERSION = '0.1.1'
+export const VERSION = '0.2.0'
 
 /** 所有路由都挂在这个前缀下，避免和 DSH / 别的插件抢路径。 */
 export const BASE_PATH = '/api/qq-persona-switch'
@@ -246,6 +257,29 @@ function guard(req, method, { write = false } = {}) {
   }
 }
 
+// ── 按对话指定的状态 ────────────────────────────────────────────────────────
+
+/**
+ * 把「按对话」那部分状态读出来给页面。
+ *
+ * 这些文件都在桥接的 state/ 下，所以桥接不可达时**仍然能读**（只是会话映射可能是旧的）。
+ * 页面需要这个能力：桥挂了的时候用户还要能看到「我给哪个群指定了谁」。
+ */
+export function describePerChat(settings) {
+  const bridgeDir = text(settings?.bridgeDir)
+  if (bridgeDir.length === 0) {
+    return { mode: 'global', chats: [], assignments: {}, hasSnapshot: false, error: '没有 qq-bridge 目录，按对话指定不可用' }
+  }
+  const store = readStore(bridgeDir)
+  const { sessions } = readSessions(bridgeDir)
+  return {
+    mode: store.mode,
+    chats: listChats({ store, sessions }),
+    assignments: store.assignments,
+    hasSnapshot: Boolean(store.snapshot),
+  }
+}
+
 async function handleState(req, res, config) {
   try {
     guard(req, 'GET')
@@ -254,6 +288,7 @@ async function handleState(req, res, config) {
     const state = await readState({ bridge, persona, workspaceCwd: settings.workspaceCwd })
     sendJson(res, 200, {
       ...state,
+      perChat: describePerChat(settings),
       settings: {
         bridgeDir: settings.bridgeDir,
         bridgeDirSource: settings.bridgeDirSource,
@@ -271,11 +306,115 @@ async function handleState(req, res, config) {
   }
 }
 
+/** 进 / 出「按对话」模式。进入时会拍快照，退出时原样还回去。 */
+async function handleMode(req, res, config) {
+  try {
+    guard(req, 'POST', { write: true })
+    const body = await readJsonBody(req)
+    const settings = resolveSettings(config)
+    if (text(settings.bridgeDir).length === 0) throw new HttpError(400, '没有 qq-bridge 目录，按对话指定不可用')
+    const target = body?.mode === 'perChat' ? 'perChat' : body?.mode === 'global' ? 'global' : null
+    if (target === null) throw new HttpError(400, 'mode 只能是 perChat 或 global')
+
+    const store = readStore(settings.bridgeDir)
+    if (store.mode === target) {
+      sendJson(res, 200, { ok: true, mode: target, changed: false, perChat: describePerChat(settings) })
+      return
+    }
+    const { bridge, persona } = buildClients(settings)
+    const { sessions } = readSessions(settings.bridgeDir)
+    const result = target === 'perChat'
+      ? await enterPerChat({ bridge, persona, store, workspaceCwd: settings.workspaceCwd })
+      : await exitPerChat({ bridge, persona, store, workspaceCwd: settings.workspaceCwd, sessions })
+
+    writeStore(settings.bridgeDir, result.store)
+    diag(`mode -> ${target} (warnings=${result.warnings.length})`)
+    sendJson(res, 200, {
+      ok: true,
+      mode: target,
+      changed: true,
+      warnings: result.warnings,
+      perChat: describePerChat(settings),
+    })
+  } catch (error) {
+    const { status, message } = describeError(error)
+    diag(`mode failed: ${message}`)
+    sendJson(res, status, { ok: false, error: message })
+  }
+}
+
+/** 给某个对话定人设。会话还没出现时只记账，返回 pending。 */
+async function handleAssign(req, res, config) {
+  try {
+    guard(req, 'POST', { write: true })
+    const body = await readJsonBody(req)
+    const settings = resolveSettings(config)
+    if (text(settings.bridgeDir).length === 0) throw new HttpError(400, '没有 qq-bridge 目录，按对话指定不可用')
+
+    const store = readStore(settings.bridgeDir)
+    if (store.mode !== 'perChat') throw new HttpError(400, '当前是「一个人设全局生效」，先切到按对话模式再指定')
+
+    const { sessions } = readSessions(settings.bridgeDir)
+    const { persona } = buildClients(settings)
+    const result = await assignChat({
+      store,
+      sessions,
+      persona,
+      chatKey: body?.chatKey,
+      source: body?.source,
+      id: body?.id,
+    })
+    if (!result.ok) throw new HttpError(400, result.error)
+
+    writeStore(settings.bridgeDir, result.store)
+    diag(`assign ${body?.chatKey} -> ${body?.source}:${body?.id ?? '-'} pending=${result.pending}`)
+    sendJson(res, 200, {
+      ok: true,
+      chatKey: body?.chatKey,
+      source: body?.source,
+      id: body?.id ?? null,
+      pending: result.pending,
+      warnings: result.warnings,
+      perChat: describePerChat(settings),
+    })
+  } catch (error) {
+    const { status, message } = describeError(error)
+    diag(`assign failed: ${message}`)
+    sendJson(res, status, { ok: false, error: message })
+  }
+}
+
+/** 把「记下了但还没落到会话上」的选择补写一遍。 */
+async function handleSync(req, res, config) {
+  try {
+    guard(req, 'POST', { write: true })
+    const settings = resolveSettings(config)
+    if (text(settings.bridgeDir).length === 0) throw new HttpError(400, '没有 qq-bridge 目录，按对话指定不可用')
+    const store = readStore(settings.bridgeDir)
+    if (store.mode !== 'perChat') throw new HttpError(400, '没在按对话模式，没有需要同步的东西')
+
+    const { sessions } = readSessions(settings.bridgeDir)
+    const { persona } = buildClients(settings)
+    const result = await reconcile({ store, sessions, persona })
+    diag(`sync applied=${result.applied}`)
+    sendJson(res, 200, { ok: true, applied: result.applied, warnings: result.warnings, perChat: describePerChat(settings) })
+  } catch (error) {
+    const { status, message } = describeError(error)
+    diag(`sync failed: ${message}`)
+    sendJson(res, status, { ok: false, error: message })
+  }
+}
+
 async function handleSwitch(req, res, config) {
   try {
     guard(req, 'POST', { write: true })
     const body = await readJsonBody(req)
     const settings = resolveSettings(config)
+    // 按对话模式下全局切换是没有意义的：桥接的 role 被刻意清空着，改了也会被
+    // 下一次读状态当成「没生效」。直接拒绝，比让用户以为点了没反应好。
+    if (text(settings.bridgeDir).length > 0 && readStore(settings.bridgeDir).mode === 'perChat') {
+      throw new HttpError(400, '当前是「按对话指定」模式；要整体切换请先切回「一个人设全局生效」')
+    }
     const { bridge, persona } = buildClients(settings)
     const result = await switchPersona(body, { bridge, persona, workspaceCwd: settings.workspaceCwd })
     if (!result.ok) {
@@ -308,12 +447,60 @@ function effect(scope, factory, label) {
   return factory()
 }
 
+/**
+ * 提示词注入：按对话模式下，本会话分到人格卡时由这里说话。
+ *
+ * 每次组装提示词都会调用 `text`，所以它必须同步、纯读、出错返回空串——
+ * 抛异常会把整次对话打挂，而「这层不注入」最多是没人格，后者可以接受。
+ */
+function makeSectionText(config) {
+  return function sectionText(context) {
+    try {
+      const settings = resolveSettings(config)
+      if (text(settings.bridgeDir).length === 0) return ''
+      const store = readStore(settings.bridgeDir)
+      if (store.mode !== 'perChat') return ''
+      const { sessions } = readSessions(settings.bridgeDir)
+      const sessionId = context?.agent?.session?.header?.id
+      return injectionText({
+        store,
+        sessions,
+        sessionId,
+        bridgeDir: settings.bridgeDir,
+      })
+    } catch (error) {
+      diag(`section failed: ${error?.message ?? error}`)
+      return ''
+    }
+  }
+}
+
 export function apply(ctx, config = {}) {
   diag(`apply; inject=${typeof ctx?.inject}; config=${JSON.stringify({ ...config, consoleToken: config?.consoleToken ? '***' : '' })}`)
   if (typeof ctx?.inject !== 'function') {
     diag('没有 ctx.inject：这个 DSH 版本不支持 webServer 注入，插件不生效')
     return
   }
+
+  // 提示词段落。DSH 0.2.x 的服务名就是 `systemPrompt`（dsh-persona-dafeiyu 同款）。
+  ctx.inject(['systemPrompt'], (scope) => {
+    const systemPrompt = scope?.systemPrompt
+    if (!systemPrompt || typeof systemPrompt.section !== 'function') {
+      diag('systemPrompt 服务不可用：按对话模式不会注入人格卡')
+      return
+    }
+    effect(
+      scope,
+      () => systemPrompt.section({
+        name: 'qq-persona-switch:role',
+        order: 0,
+        text: makeSectionText(config),
+        interpolate: false,
+      }),
+      'qq-persona-switch: role section',
+    )
+    diag('registered section qq-persona-switch:role')
+  })
 
   ctx.inject(['webServer'], (scope) => {
     const webServer = scope?.webServer
@@ -326,6 +513,9 @@ export function apply(ctx, config = {}) {
       [`${BASE_PATH}/`, 'qq-persona-switch: page (slash)', handlePage],
       [`${BASE_PATH}/state`, 'qq-persona-switch: state', (req, res) => handleState(req, res, config)],
       [`${BASE_PATH}/switch`, 'qq-persona-switch: switch', (req, res) => handleSwitch(req, res, config)],
+      [`${BASE_PATH}/mode`, 'qq-persona-switch: mode', (req, res) => handleMode(req, res, config)],
+      [`${BASE_PATH}/assign`, 'qq-persona-switch: assign', (req, res) => handleAssign(req, res, config)],
+      [`${BASE_PATH}/sync`, 'qq-persona-switch: sync', (req, res) => handleSync(req, res, config)],
     ]
     for (const [routePath, label, handler] of routes) {
       effect(scope, () => webServer.register({ kind: 'exact', path: routePath, handler }), label)

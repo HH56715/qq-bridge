@@ -23,9 +23,16 @@ mixed into one reply, with no way to tell which one is live — and the bridge o
 for the other side.
 
 `plugins/qq-persona-switch` lists both sides in one place and makes picking one turn the other
-off explicitly. It talks to qq-bridge's existing HTTP API (`/api/roles`, `/api/role`,
-`/api/status`) and to dsh-persona-dafeiyu's local API; nothing in the bridge source is patched
-to support it.
+off explicitly. On top of that it can hold a different persona per conversation: it reads
+`state/sessions.json` to map a DSH session back to its QQ chat, injects that chat's role card
+itself as a `systemPrompt` section, and tells dsh-persona-dafeiyu which persona to use for the
+same session (`set-session-persona`). While that mode is on, both sides' global injection is
+switched off and the previous settings are kept in `<bridgeDir>/state/qq-persona-switch.json`
+so leaving the mode restores them.
+
+It only uses qq-bridge's existing HTTP API (`/api/roles`, `/api/role`, `/api/status`), its
+`state/` files, and dsh-persona-dafeiyu's local API; nothing in the bridge source is patched to
+support it.
 
 ```bash
 dsh plugin --profile web add github:HH56715/qq-bridge#path:/plugins/qq-persona-switch
