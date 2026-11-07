@@ -5,16 +5,16 @@
   "type": "module",
   "main": "./lib/index.js",
   "license": "MIT",
-  "author": "suisen123",
+  "author": "HH56715",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/suisen123/qq-bridge.git",
+    "url": "git+https://github.com/HH56715/qq-bridge.git",
     "directory": "plugins/qq-persona-switch"
   },
   "bugs": {
-    "url": "https://github.com/suisen123/qq-bridge/issues"
+    "url": "https://github.com/HH56715/qq-bridge/issues"
   },
-  "homepage": "https://github.com/suisen123/qq-bridge/tree/main/plugins/qq-persona-switch#readme",
+  "homepage": "https://github.com/HH56715/qq-bridge/tree/main/plugins/qq-persona-switch#readme",
   "keywords": [
     "dsh",
     "dsh-plugin",

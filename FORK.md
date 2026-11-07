@@ -28,7 +28,7 @@ off explicitly. It talks to qq-bridge's existing HTTP API (`/api/roles`, `/api/r
 to support it.
 
 ```bash
-dsh plugin --profile web add github:suisen123/qq-bridge#path:/plugins/qq-persona-switch
+dsh plugin --profile web add github:HH56715/qq-bridge#path:/plugins/qq-persona-switch
 ```
 
 Requires a running qq-bridge (its console port) and, for the second half of the list,

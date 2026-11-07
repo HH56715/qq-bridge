@@ -26,7 +26,7 @@
 本包住在 [qq-bridge](https://github.com/Derpyu520/qq-bridge) fork 的 `plugins/` 子目录里，按子目录装：
 
 ```powershell
-dsh plugin --profile web add github:suisen123/qq-bridge#path:/plugins/qq-persona-switch
+dsh plugin --profile web add github:HH56715/qq-bridge#path:/plugins/qq-persona-switch
 ```
 
 装完重启 DSH。零依赖、无构建步骤，不需要联网拉别的包。
