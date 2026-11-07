@@ -1,0 +1,14 @@
+# 一个 loader entry。`name` 必须是包名（DSH 按它解析模块）；
+# `id` 只是这条 entry 的身份，可以随便取，但要在整个 profile 里唯一。
+#
+# 配置项全部留空就够用：填了 bridgeDir，令牌/工作区/两端端口都会从
+# <qq-bridge>/config.json 和 state/console-token 自动读出来。
+- insert:
+    - id: qq-persona-switch
+      name: qq-persona-switch
+      config:
+        bridgeDir: ''
+        bridgeBaseUrl: ''
+        dshBaseUrl: ''
+        consoleToken: ''
+        workspaceCwd: ''
